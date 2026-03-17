@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "ai-workshop"
+version = "0.1.0"
+description = ""
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+bertopic = "^0.17.0"
+ipykernel = "^6.29.5"
+kor = "^3.0.0"
+langchain = "^0.3.26"
+langchain-community = "^0.3.26"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
