@@ -1,5 +1,6 @@
-from typing import List, Optional
+from typing import Any, List, Optional
 import boto3
+from pydantic import model_validator
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -7,13 +8,19 @@ from langchain_core.outputs import ChatResult, ChatGeneration
 
 
 class BedrockChatModel(BaseChatModel):
-    def __init__(self, model_id: str, region_name="eu-west-3"):
-        super().__init__()
+    model_config = {"arbitrary_types_allowed": True}
+
+    model_id: str
+    region_name: str = "eu-west-3"
+    client: Any = None
+
+    @model_validator(mode="after")
+    def init_client(self):
         self.client = boto3.client(
             service_name="bedrock-runtime",
-            region_name=region_name
+            region_name=self.region_name
         )
-        self.model_id = model_id
+        return self
 
     @property
     def _llm_type(self) -> str:
