@@ -1,10 +1,12 @@
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Sequence, Union
 import boto3
 from pydantic import model_validator
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatResult, ChatGeneration
+from langchain_core.tools import BaseTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 
 class BedrockChatModel(BaseChatModel):
@@ -13,6 +15,7 @@ class BedrockChatModel(BaseChatModel):
     model_id: str
     region_name: str = "eu-west-3"
     client: Any = None
+    tools: Optional[List[dict]] = None
 
     @model_validator(mode="after")
     def init_client(self):
@@ -26,23 +29,48 @@ class BedrockChatModel(BaseChatModel):
     def _llm_type(self) -> str:
         return "bedrock-chat"
 
+    def bind_tools(
+        self,
+        tools: Sequence[Union[dict, type, BaseTool]],
+        **kwargs
+    ) -> "BedrockChatModel":
+        bedrock_tools = []
+        for tool in tools:
+            openai_tool = convert_to_openai_tool(tool)["function"]
+            bedrock_tools.append({
+                "toolSpec": {
+                    "name": openai_tool["name"],
+                    "description": openai_tool.get("description", ""),
+                    "inputSchema": {
+                        "json": openai_tool.get("parameters", {"type": "object", "properties": {}})
+                    }
+                }
+            })
+        return self.model_copy(update={"tools": bedrock_tools})
+
     def _convert_messages(self, messages: List):
         converted = []
+        system = None
 
         for msg in messages:
             if isinstance(msg, SystemMessage):
-                role = "system"
+                system = msg.content
             elif isinstance(msg, HumanMessage):
-                role = "user"
+                converted.append({"role": "user", "content": [{"text": msg.content}]})
+            elif isinstance(msg, ToolMessage):
+                converted.append({
+                    "role": "user",
+                    "content": [{
+                        "toolResult": {
+                            "toolUseId": msg.tool_call_id,
+                            "content": [{"text": msg.content}]
+                        }
+                    }]
+                })
             else:
-                role = "assistant"
+                converted.append({"role": "assistant", "content": [{"text": msg.content}]})
 
-            converted.append({
-                "role": role,
-                "content": [{"text": msg.content}]
-            })
-
-        return converted
+        return system, converted
 
     def _generate(
         self,
@@ -51,17 +79,38 @@ class BedrockChatModel(BaseChatModel):
         **kwargs
     ) -> ChatResult:
 
-        bedrock_messages = self._convert_messages(messages)
+        system, bedrock_messages = self._convert_messages(messages)
 
-        response = self.client.converse(
-            modelId=self.model_id,
-            messages=bedrock_messages
-        )
+        params: dict = {"modelId": self.model_id, "messages": bedrock_messages}
 
-        output_text = response["output"]["message"]["content"][0]["text"]
+        if system:
+            params["system"] = [{"text": system}]
 
-        message = AIMessage(content=output_text)
+        if self.tools:
+            params["toolConfig"] = {
+                "tools": self.tools,
+                "toolChoice": {"any": {}}
+            }
 
-        generation = ChatGeneration(message=message)
+        response = self.client.converse(**params)
 
-        return ChatResult(generations=[generation])
+        content = response["output"]["message"]["content"]
+        stop_reason = response.get("stopReason")
+
+        if stop_reason == "tool_use":
+            tool_calls = []
+            for block in content:
+                if "toolUse" in block:
+                    tool_use = block["toolUse"]
+                    tool_calls.append({
+                        "name": tool_use["name"],
+                        "args": tool_use["input"],
+                        "id": tool_use["toolUseId"],
+                        "type": "tool_call"
+                    })
+            message = AIMessage(content="", tool_calls=tool_calls)
+        else:
+            output_text = content[0]["text"]
+            message = AIMessage(content=output_text)
+
+        return ChatResult(generations=[ChatGeneration(message=message)])
